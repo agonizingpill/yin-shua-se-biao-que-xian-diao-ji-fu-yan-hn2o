@@ -97,3 +97,22 @@ PrintPack箱码唯一，open可取消；production且无活动Hold/待判读样�
 按父工单锁串行化领退纸、累计印量、封箱和装运；锁读populate_existing刷新身份缓存。MySQL使用READ COMMITTED，取得工单锁后的聚合读取已提交净领纸/封箱量，避免等待前快照导致超额。种子仅缺失时添加157g/128g批次和PRESS-04，保留人工库存、历史signed与发货快照。
 
 本演示按张数追溯，不接真实WMS/物流，也不估算裁切、调机废纸；生产累计读数和现场可退余纸由机长录入，系统约束上限及一次退回。原240次/分钟限流仍生效。真实v3证据保存在test-artifacts/gb-1030/v3/。
+
+
+## V4 断网领单、离线判读与补传核对
+
+针对断网时无法在线判色、机长得停机等待的问题，新增“离线领单补传”页（第10页），把判读模型随开机单带到现场，断网也能判缺陷、记调机与复验，恢复网络后再补传核对。
+
+**领单带版本**：`POST /offline/checkouts` 建立 OfflineCheckout，冻结当时的参考集指纹（SHA256前16位+张数）、完整模型快照（StandardScaler均值/方差、RBF SVM 的支持向量、按类块的对偶系数、intercept、Platt probA/probB、留出核验）、开机单快照与当时调机台账。同一工单存在未核对领单时拒绝重复领单。
+
+**离线判读同参复算**：浏览器端 `frontend/src/offline/engine.js` 按 libsvm `svm.cpp` 同构实现——查询特征先按导出的 scaler 标准化，OVO 决策值 `dc[c2-1,类c1块]·K + dc[c1,类c2块]·K + intercept`，再经 `sigmoid_predict`（Platt）与 Wu-Lin-Weng 两两耦合得三类概率。`backend/tests/parity_generate.py` 用真实参考集对拍 sklearn，四类用例标签 4/4 一致、最大概率偏差约 5e-6。离线记录存 localStorage（`offline/storage.js`），可登记色标、判读、按缺陷生成/修订/执行调机、执行后重新取样复验；离线不提供签印。
+
+**补传幂等可续**：`POST /offline/checkouts/{id}/sync` 按 seq 顺序重放，每条记录用客户端 UUID 唯一约束，已处理记录重传直接回放结果、不重复收样；每条用 SAVEPOINT 独立事务，单条冲突只回滚该条并留档为 conflicted，不影响前后记录，中断后可从断点续传。冲突原因（线上已改调机、判读版本漂移、重复色标、工单已量产等）写在 OfflineRecord.conflict_reason 并把领单置 conflicted。
+
+**线上改调机的冲突处置**：领单后在线渠道仍可调机；补传时把当前调机台账与领单快照比对，本领单自身落地的调机除外。一旦发现线上新增或改动调机，离线的调机/修订/执行类记录一律冲突留档、不落地，提示重新取样在线复验；离线色标与判读仍保留。
+
+**签印守卫**：`sign_guard` 在主管签印（`/adjustments/{id}/sign`）与停机复机（`/press-holds/{id}/close`）前检查，只要工单存在 active/conflicted 的未核对领单就 409 拦截；主管在离线页对冲突逐条核对、填写依据后 `POST /offline/checkouts/{id}/reconcile` 关闭领单，此后才能用离线复验张走原签印接口。调机页（adjustments.js）显示该工单的离线领单、判读版本与待核对原因，离线判读色标在判读页与调机页带“离线判读”标记及版本号。
+
+主要 API：`GET/POST /offline/checkouts`、`GET /offline/checkouts/{id}`（含逐条记录）、`GET /offline/records`、`POST /offline/checkouts/{id}/sync`、`POST /offline/checkouts/{id}/reconcile`（仅主管）。新2表 OfflineCheckout/OfflineRecord 自动建表，无旧表结构变更，签印/复机仅新增守卫，原在线流程不变。
+
+范围：离线判读依赖领单时刻冻结的模型，参考集变化会使旧领单判读在补传时按版本漂移拦截并要求重新取样；离线记录仅存本机浏览器，换机不共享；离线不做印版/点检/纸张等在线守卫，调机执行在补传时才校验印版就绪与今日点检；不替代主管在线签印。验证见 `backend/tests/offline_integration.py`（23项，SQLite+TestClient，覆盖领单、断点续传、幂等不重复、线上改调机冲突、版本漂移、签印守卫、核对后离线复验签印）与 `frontend/tests`（引擎与本地存储 Node 单测）。

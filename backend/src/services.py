@@ -20,7 +20,7 @@ def issue(s,proof_id):
     if p.classification_state!='classified' or p.defect not in ('乳化','偏色'):raise HTTPException(409,'仅已判读的不合格色标可生成调机指令')
     if s.scalar(select(Adjustment.id).where(Adjustment.job_id==job.id,Adjustment.status!='signed')):raise HTTPException(409,'本工单已有未闭合调机，请先完成复验')
     ink,water=(0,-8)if p.defect=='乳化'else(-6,0)
-    a=Adjustment(job_id=job.id,proof_id=p.id,ink_delta=ink,water_delta=water,status='issued');s.add(a);job.status='adjusting';return a
+    a=Adjustment(job_id=job.id,proof_id=p.id,ink_delta=ink,water_delta=water,status='issued');s.add(a);s.flush();job.status='adjusting';return a
 
 def change_instruction(s,a,data):
     if a.status!='issued':raise HTTPException(409,'已执行调机指令不可修改')
@@ -41,4 +41,6 @@ def sign(s,aid,reproof_id,user):
     if not p.classified_at or p.classified_at<a.executed_at:raise HTTPException(409,'复验判读必须在调机执行之后完成')
     from .plate_service import require_ready
     require_ready(s,job.id)
+    from .offline_service import sign_guard
+    sign_guard(s,job.id)
     a.reproof_id=p.id;a.status='signed';a.signed_by=user.email;job.status='production';return a

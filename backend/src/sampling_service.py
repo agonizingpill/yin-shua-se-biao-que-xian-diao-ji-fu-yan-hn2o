@@ -56,5 +56,7 @@ def close(s,key,p,u):
     if not hold.reproof_id:raise HTTPException(409,'须登记停机后的新色标复验')
     proof=get(s,ProofSheet,hold.reproof_id)
     if proof.job_id!=job.id or proof.classification_state!='classified' or not proof.pass_flag or proof.defect!='合格' or not proof.classified_at or proof.classified_at<hold.created_at:raise HTTPException(409,'停机后新色标未判为合格，不能复机')
+    from .offline_service import sign_guard
+    sign_guard(s,job.id)
     hold.state='closed';hold.resolution=p.resolution;hold.closed_by=u.email;hold.closed_at=now();job.status='production'
     audit(s,u,f'主管复机 停机单{key} 依据{p.resolution}');s.commit();return hold

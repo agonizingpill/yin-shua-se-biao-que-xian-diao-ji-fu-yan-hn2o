@@ -13,6 +13,7 @@ from .services import get,pack,audit,editable_proof,issue,change_instruction,sig
 from .middlewares import RequestTrace,BurstGuard
 from .production_routes import router as production
 from .dispatch_routes import router as dispatches
+from .offline_routes import router as offline
 from .plate_service import require_ready
 from .paper_service import locked
 from .constants import ROLES,DEFECTS,JOB_STATES,ADJUSTMENT_STATES
@@ -29,7 +30,7 @@ async def lifespan(app):
 app=FastAPI(title='铅叶 · 色标缺陷与调机复验',lifespan=lifespan);app.add_middleware(RequestTrace);app.add_middleware(BurstGuard)
 @app.exception_handler(IntegrityError)
 async def conflict(req,exc):return JSONResponse({'detail':'工单、色标编号或首张调机指令重复，请核对'},409)
-app.include_router(production);app.include_router(dispatches)
+app.include_router(production);app.include_router(dispatches);app.include_router(offline)
 @app.get('/health')
 def health(s=Depends(db_session)):s.execute(select(1));r.ping();return {'status':'ok'}
 @app.post('/auth/login')

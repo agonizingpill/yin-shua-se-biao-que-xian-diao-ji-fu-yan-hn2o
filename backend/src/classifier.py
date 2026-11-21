@@ -1,3 +1,4 @@
+import hashlib
 import numpy as np
 from sqlalchemy import select
 from sklearn.model_selection import train_test_split
@@ -9,11 +10,41 @@ from .models import ReferenceSheet,PrintJob
 from .constants import DEFECTS
 
 def vector(p,target=1.4):return [p.density_c/target,p.density_m/target,p.density_y/target,p.density_k/target,p.dot_gain/100]
-def classify(s,p):
+def build_model(s):
     refs=s.scalars(select(ReferenceSheet).order_by(ReferenceSheet.id)).all()
     if len(refs)<60:raise ValueError('带标签参考色标不足60张')
     x=np.array([vector(r)for r in refs]);y=np.array([r.label for r in refs]);ids=np.arange(len(refs))
     train,test=train_test_split(ids,test_size=.2,stratify=y,random_state=42)
     model=make_pipeline(StandardScaler(),SVC(kernel='rbf',C=2,probability=True,random_state=42));model.fit(x[train],y[train])
-    query=[vector(p,s.get(PrintJob,p.job_id).target_density)];label=str(model.predict(query)[0]);prob=model.predict_proba(query)[0];pred=model.predict(x[test])
-    return label,{'probabilities':{str(c):round(float(v),5)for c,v in zip(model[-1].classes_,prob)},'labels':list(DEFECTS),'confusion_matrix':confusion_matrix(y[test],pred,labels=list(DEFECTS)).tolist(),'accuracy':round(float(accuracy_score(y[test],pred)),4),'train_rows':len(train),'holdout_rows':len(test),'seed':42,'reference_codes':[refs[i].code for i in train],'holdout_codes':[refs[i].code for i in test],'current_proof_code':p.code,'feature_names':['青密度比','品红密度比','黄密度比','黑密度比','网点扩大率'],'features':vector(p,s.get(PrintJob,p.job_id).target_density)}
+    return refs,x,y,train,test,model
+def classify(s,p):
+    refs,x,y,train,test,model=build_model(s)
+    target=s.get(PrintJob,p.job_id).target_density
+    query=[vector(p,target)]
+    svc=model[-1]
+    label=str(model.predict(query)[0]);prob=model.predict_proba(query)[0];pred=model.predict(x[test])
+    return label,{'probabilities':{str(c):round(float(v),5)for c,v in zip(svc.classes_,prob)},'labels':list(DEFECTS),'confusion_matrix':confusion_matrix(y[test],pred,labels=list(DEFECTS)).tolist(),'accuracy':round(float(accuracy_score(y[test],pred)),4),'train_rows':len(train),'holdout_rows':len(test),'seed':42,'reference_codes':[refs[i].code for i in train],'holdout_codes':[refs[i].code for i in test],'current_proof_code':p.code,'feature_names':['青密度比','品红密度比','黄密度比','黑密度比','网点扩大率'],'features':vector(p,target)}
+def reference_fingerprint(s):
+    rows=s.execute(select(ReferenceSheet.code,ReferenceSheet.label,ReferenceSheet.density_c,ReferenceSheet.density_m,ReferenceSheet.density_y,ReferenceSheet.density_k,ReferenceSheet.dot_gain).order_by(ReferenceSheet.id)).all()
+    h=hashlib.sha256()
+    for r in rows:h.update('|'.join(str(v)for v in r).encode())
+    return h.hexdigest()[:16],len(rows)
+def export_model(s):
+    """导出浏览器端离线判读所需的完整模型快照，离线复算与sklearn同参同结果。"""
+    refs,x,y,train,test,model=build_model(s)
+    scaler=model[0];svc=model[-1]
+    pred=model.predict(x[test])
+    gamma=svc._gamma
+    pairwise=[{'probA':float(a),'probB':float(b)}for a,b in zip(svc.probA_,svc.probB_)] if hasattr(svc,'probA_') else []
+    return {
+        'labels':[str(c)for c in svc.classes_],
+        'scaler_mean':[float(v)for v in scaler.mean_],
+        'scaler_scale':[float(v)for v in scaler.scale_],
+        'svm_gamma':float(gamma),'svm_C':2,
+        'support_vectors':svc.support_vectors_.tolist(),
+        'n_support':[int(v)for v in svc.n_support_],
+        'dual_coef':svc.dual_coef_.tolist(),
+        'intercept':[float(v)for v in svc.intercept_],
+        'pairwise_prob':pairwise,
+        'holdout':{'labels':list(DEFECTS),'confusion_matrix':confusion_matrix(y[test],pred,labels=list(DEFECTS)).tolist(),'accuracy':round(float(accuracy_score(y[test],pred)),4),'train_rows':len(train),'holdout_rows':len(test),'seed':42,'reference_codes':[refs[i].code for i in train],'holdout_codes':[refs[i].code for i in test]},
+    }
